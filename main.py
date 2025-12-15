@@ -6,39 +6,42 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 from web3 import Web3
 from eth_account import Account
-# from web3.middleware.proof_of_authority import ProofOfAuthorityMiddleware
-# from web3.middleware import geth_poa_middleware
 from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
 
 # =========================
 # 🧩 Configuration initiale
 # =========================
 
-DRY_RUN = True                  # True pour test, False pour vrai trading
-DRY_RUN_SLEEP = 1 * 60
+DRY_RUN = True                  # True MODE ESSAI, False pour vrai trading
+DRY_RUN_SLEEP = 1 * 60          # 1 min
 
 KEY_PATHS = [
-    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.key")
-    # os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.key"),
+    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.key"),
+   # os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.key"),
 ]
 ENC_PATHS = [
-    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.enc")
-    # os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.enc"),
+    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.enc"),
+    #os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.enc"),
 ]
 
-BUY_PORTION = Decimal("0.2")                        # 1/5 BNB wallet
-SELL_PORTION = Decimal("0.75")                      # 3/4 MRS wallet
+# nameWallets = {"Account1": "5G824"
+#               "Account2": "8F000"
+#               }
+
+BUY_PORTION = Decimal("0.21")                       # 1/5 BNB wallet
+SELL_PORTION = Decimal("0.761")                     # 3/4 MRS wallet
 MIN_BNB_USD_THRESHOLD = Decimal("5.0")
+MIN_MRS_USB_THRESHOLD = Decimal("110")              # ~$110
 MAX_GAS_USD = Decimal("0.011")
 GWEI = 0.05
-GAS_LIMIT_EST = 170000
+GAS_LIMIT = 170000
 GAS_LIMIT_APPROVE = 100000
 SLIPPAGE = 0.01  # 1% buy/sell slippage
 
 START_HOUR = 6                                      # 6h - 22h
 END_HOUR = 22
-RANDOM_MIN = 60 * (60 + 2)                          # tx apres 1h02 a 1h57
-RANDOM_MAX = 60 * (60 + 57)
+RANDOM_MIN = 60 * 5                                 # tx apres 5-9 min
+RANDOM_MAX = 60 * 9
 
 RETRY_WAIT_SECONDS = 5                              # 5s
 random.seed()
@@ -50,8 +53,6 @@ getcontext().prec = 28                              # Decimal : 28
 
 BSC_RPC = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org/")
 w3 = Web3(Web3.HTTPProvider(BSC_RPC))
-# w3.middleware_onion.inject(ProofOfAuthorityMiddleware, layer=0)
-# w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
 CONTRACT_MRS = Web3.to_checksum_address("0x14e3598571F4683CEA1Ff2a917F4a3354Cd5842b")
@@ -116,16 +117,16 @@ def from_wei(amount, decimals=18):
     return Decimal(amount)/(10**decimals)
 
 def gas_fee_usd(bnb_price):
-    fee_wei = int(GWEI*1e9*GAS_LIMIT_EST)
+    fee_wei = int(GWEI*1e9*GAS_LIMIT)
     fee_bnb = Decimal(fee_wei)/Decimal(1e18)
     return fee_bnb*bnb_price
 
-def get_bnb_price_h1():
+def get_bnb_price_m5():
     url = f"https://api.dexscreener.com/latest/dex/tokens/{WBNB}"
     try:
         r = requests.get(url, timeout=8).json()
         pair = r["pairs"][0]
-        return Decimal(str(pair["priceUsd"])), float(pair["priceChange"]["h1"])
+        return Decimal(str(pair["priceUsd"])), float(pair["priceChange"]["m5"])
     except:
         return None, None
 
@@ -136,8 +137,8 @@ def get_mrs_last_tx():
         pairs = j.get("pairs",[])
         if not pairs: return None
         pair = next((p for p in pairs if p.get("chain")=="bsc"),pairs[0])
-        h1 = pair.get("txns",{}).get("h1",{})
-        total = h1.get("buys",0)+h1.get("sells",0)
+        m5 = pair.get("txns",{}).get("m5",{})
+        total = m5.get("buys",0) + m5.get("sells",0)
         return total
     except:
         return None
@@ -154,82 +155,19 @@ def wait_random():
 # ✔️  Approve Wallets "infinity"
 # ==============================
 
-# def ensure_approval(wallet, private_key, amount_token_wei):
-#     allowance = token.functions.allowance(wallet,PANCAKE_ROUTER).call()
-#     if allowance >= amount_token_wei:
-#         return
-
-#     tx = token.functions.approve(PANCAKE_ROUTER, amount_token_wei).build_transaction({
-#         "from":wallet,
-#         "nonce":w3.eth.get_transaction_count(wallet),
-#         "gas": GAS_LIMIT_APPROVE,
-#         "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
-#         "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
-#         "chainId": 56
-#     })
-
-#     if DRY_RUN:
-#         log(f"[DRY_RUN] approve tx: {tx}")
-#         return
-    
-#     signed=w3.eth.account.sign_transaction(tx,private_key)
-#     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-#     log(f"APPROVE sent: {tx_hash.hex()}")
-
-# ==============================================
-
-# def ensure_approval(wallet, private_key):
-#     """
-#     Approve infini une seule fois pour PancakeSwap.
-#     Ne refait rien si l'allowance est déjà suffisante.
-#     """
-#     spender = PANCAKE_ROUTER
-#     max_approval = 2**256 - 1
-
-#     try:
-#         current_allow = token.functions.allowance(wallet, spender).call()
-#         # Déjà approuvé → rien à faire
-#         if current_allow > 10**30:
-#             log(f"[{ts()}] ✓ Allowance déjà infinie, aucun approve nécessaire.")
-#             return True
-#         log(f"[{ts()}] ⚠️ Allowance insuffisante → Approve Infinity…")
-
-#         # Prépare la TX d’approve
-#         tx = token.functions.approve(spender, max_approval).build_transaction({
-#             "from": wallet,
-#             "nonce": w3.eth.get_transaction_count(wallet),
-#             "gas": 120000,
-#             "gasPrice": w3.to_wei(GWEI, "gwei"),
-#             "chainId": 56,
-#         })
-
-#         if DRY_RUN:
-#             log(f"[DRY_RUN] approve infinity tx: {tx}")
-#             return True
-
-#         # Signature & envoi
-#         signed = w3.eth.account.sign_transaction(tx, private_key)
-#         tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-#         log(f"[{ts()}] ✔️ Approve Infinity envoyé ! Hash: {tx_hash.hex()}")
-#         return True
-
-#     except Exception as e:
-#         log(f"[{ts()}] ❌ Erreur approve: {e}")
-#         return False
-
 def approve_infinity(wallet, private_key):  
     MAX_UINT = int(2**256 - 1)
 
     try:
         current_allowance = token.functions.allowance(wallet, PANCAKE_ROUTER).call()
-        if current_allowance >= MAX_UINT:
-            log(f"🎯 Wallet {wallet} already approved (infinity)")
+        if current_allowance > 0:
+            log(f"📌 Wallet {wallet} already approved (infinity)")
             return
         
         tx = token.functions.approve(PANCAKE_ROUTER, MAX_UINT).build_transaction({
             "from": wallet,
             "nonce": w3.eth.get_transaction_count(wallet),
-            "gas": 100000,
+            "gas": GAS_LIMIT_APPROVE,
             "maxFeePerGas": int(GWEI*1e9),
             "maxPriorityFeePerGas": int(GWEI*1e9),
             "chainId": 56
@@ -238,7 +176,13 @@ def approve_infinity(wallet, private_key):
         # Signature & envoi
         signed = w3.eth.account.sign_transaction(tx, private_key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        log(f"✔️ APPROVE INFINITY sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+
+        log(f"🚀 Approve envoyé, attente de confirmation...")
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        if receipt.status == 1:
+            log(f"✅ APPROVE CONFIRMÉ : https://bscscan.com/tx/0x{tx_hash.hex()}")
+        else:
+            log("❌ Approve échoué")
         time.sleep(10)
 
     except Exception as e:
@@ -261,7 +205,7 @@ def buy(wallet, private_key, bnb_amount):
     ).build_transaction({
         "from":wallet,
         "value":amount_in_wei,
-        "gas":GAS_LIMIT_EST,
+        "gas":GAS_LIMIT,
         "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
         "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
         "nonce":w3.eth.get_transaction_count(wallet),
@@ -289,7 +233,7 @@ def sell(wallet, private_key, token_wei):
         token_wei,min_out,path,wallet,int(time.time())+120
     ).build_transaction({
         "from":wallet,
-        "gas":GAS_LIMIT_EST,
+        "gas":GAS_LIMIT,
         "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
         "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
         "nonce":w3.eth.get_transaction_count(wallet),
@@ -315,9 +259,9 @@ def main_loop():
         addr = get_wallet_address(pk)
         wallets.append({"pk":pk,"addr":addr})
         log(f"Wallet loaded: {addr}")
-        if not DRY_RUN:
-            approve_infinity(addr, pk)
-    log(f"Bot démarré. DRY_RUN = {DRY_RUN}")
+        # if not DRY_RUN:
+        #     approve_infinity(addr, pk)
+    log(f"Bot démarré ! {"MODE ESSAI = ON 💡" if DRY_RUN else "(Mode Essai = OFF)" }")
     
     wallet_idx = 0
     first_tx = True
@@ -326,7 +270,7 @@ def main_loop():
         wallet_idx = (wallet_idx+1)%len(wallets)
         pk, addr = wallet["pk"], wallet["addr"]
 
-        bnb_price, bnb_change=get_bnb_price_h1()
+        bnb_price, bnb_change=get_bnb_price_m5()
         if bnb_price is None: 
             log(f"Erreur BNB price, retry in {RETRY_WAIT_SECONDS} min."); time.sleep(RETRY_WAIT_SECONDS * 60); continue
 
@@ -334,32 +278,40 @@ def main_loop():
             last_tx = get_mrs_last_tx()
             if last_tx is None:
                 log("Dexscreener returned None -> trade direct")
-            elif last_tx>0:
-                log(f"{last_tx} txs dans h1 -> attente aléatoire {RANDOM_MIN//60}-{RANDOM_MAX//60} min avant première tx")
+            elif last_tx > 0:
+                log(f"{last_tx} txs dans m5 -> attente aléatoire {RANDOM_MIN//60}-{RANDOM_MAX//60} min avant première tx")
                 wait_random()
             first_tx = False
         else:
             wait_random()
         
-        bnb_bal, mrs_bal_decimal, mrs_bal_wei=get_balances(addr)
+        bnb_bal, mrs_bal_decimal, mrs_bal_wei = get_balances(addr)
         bnb_value_usd = bnb_bal*bnb_price
         log(f"Wallet {addr}: BNB ${bnb_value_usd:.2f}, {mrs_bal_decimal:.2f} MRS")
         
-        if bnb_value_usd<MIN_BNB_USD_THRESHOLD and mrs_bal_wei>0:
+        # IF Wallet BNB < $5 -> SELL MRS
+        if bnb_value_usd < MIN_BNB_USD_THRESHOLD and mrs_bal_wei > 0:
             sell_amount = int(mrs_bal_wei*SELL_PORTION)
-            log(f"BNB < ${MIN_BNB_USD_THRESHOLD}, SELL {SELL_PORTION*100}% MRS")
+            log(f"BNB < ${MIN_BNB_USD_THRESHOLD}, SELL {SELL_PORTION*100:.1f}% MRS")
             sell(addr,pk,sell_amount)
             continue
+        
+        # # IF Wallet MRS < $3 -> BUY MRS
+        # if mrs_value_usd < MIN_MRS_USB_THRESHOLD and bnb_bal_wei > 0:
+        #     buy_amount = int(bnb_bal_wei * BUY_PORTION)
+        #     log(f"MRS < ${MIN_MRS_USB_THRESHOLD}, BUY {BUY_PORTION*100:.5f}% BNB -> MRS")
+        #     buy(addr, pk, buy_amount)
+        #     continue
 
-        if bnb_change>0:
+        if bnb_change >= 0:
             buy_amount = bnb_bal*BUY_PORTION
-            if buy_amount>0: 
-                log(f"BNB UP {bnb_change:.2f}% (${bnb_price:.2f}) : BUY {buy_amount:.5f} BNB -> MRS")
+            if buy_amount > 0: 
+                log(f"⬆️  BNB UP {bnb_change:.2f}% (${bnb_price:.2f}) : BUY {buy_amount:.5f} BNB -> MRS")
                 buy(addr,pk,buy_amount)
         else:
-            if mrs_bal_wei>0:
+            if mrs_bal_wei > 0:
                 sell_amount = int(mrs_bal_wei*SELL_PORTION)
-                log(f"BNB DOWN {bnb_change:.2f}% (${bnb_price:.2f}) -> SELL {SELL_PORTION*100}% MRS")
+                log(f"⬇️  BNB DOWN {bnb_change:.2f}% (${bnb_price:.2f}) -> SELL {SELL_PORTION*100:.1f}% MRS")
                 sell(addr,pk,sell_amount)
 
 if __name__=="__main__":
