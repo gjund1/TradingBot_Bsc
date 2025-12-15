@@ -1,61 +1,62 @@
 #!/usr/bin/env python3
 
-import os, time, json, random, traceback, requests
+import os, time, json, random, requests
 from decimal import Decimal, getcontext
-from typing import Optional, Tuple
+from datetime import datetime
 from cryptography.fernet import Fernet
 from web3 import Web3
 from eth_account import Account
+# from web3.middleware.proof_of_authority import ProofOfAuthorityMiddleware
+# from web3.middleware import geth_poa_middleware
+from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
 
-# ==========================
-# CONFIG (modifie ici)
-# ==========================
+# =========================
+# 🧩 Configuration initiale
+# =========================
 
-DRY_RUN = True  # Mode test (pas d'envoi de tx)
+DRY_RUN = True                  # True pour test, False pour vrai trading
+DRY_RUN_SLEEP = 1 * 60
 
-WALLETS_KEYS = [
-    (os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.key"),
-     os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.enc")),
+KEY_PATHS = [
+    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.key")
+    # os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.key"),
+]
+ENC_PATHS = [
+    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.enc")
+    # os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.enc"),
 ]
 
-BSC_RPC = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org/")
-ETHSCAN_API_KEY = "3CQGMXHAZGSJZE5PK2M7EV23S3QFED6CGV"
-
-MRS_TOKEN_ADDRESS = "0x14e3598571F4683CEA1Ff2a917F4a3354Cd5842b"
-PANCAKE_ROUTER_RAW = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
-WBNB_RAW = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
-
-ACTIVE_START_HOUR = 6                               # 6h - 22h
-ACTIVE_END_HOUR = 22
-
-BUY_PORTION = Decimal("0.20")
-SELL_PORTION = Decimal("0.75")
+BUY_PORTION = Decimal("0.2")                        # 1/5 BNB wallet
+SELL_PORTION = Decimal("0.75")                      # 3/4 MRS wallet
 MIN_BNB_USD_THRESHOLD = Decimal("5.0")
-
-SLIPPAGE = Decimal("0.01")
-GWEI = Decimal("0.05")                              # 0.05 Gwei
-GAS_LIMIT_SWAP = 170000
+MAX_GAS_USD = Decimal("0.011")
+GWEI = 0.05
+GAS_LIMIT_EST = 170000
 GAS_LIMIT_APPROVE = 100000
-MAX_GAS_USD = Decimal("0.012")                      # frais max 0.012 $
+SLIPPAGE = 0.01  # 1% buy/sell slippage
 
-MIN_TRIGGER_MIN = 5                                 # tx apres 5 a 100 minutes
-MAX_TRIGGER_MIN = 100
+START_HOUR = 6                                      # 6h - 22h
+END_HOUR = 22
+RANDOM_MIN = 60 * (60 + 2)                          # tx apres 1h02 a 1h57
+RANDOM_MAX = 60 * (60 + 57)
 
-RETRY_WAIT_SECONDS = 10 * 60                        # 10s
-DEXSCR_NULL_WAIT = 10 * 60
-
+RETRY_WAIT_SECONDS = 5                              # 5s
 random.seed()
-HTTP_TIMEOUT = 10
 getcontext().prec = 28                              # Decimal : 28
 
-# ===========================
-# Setup Web3 / contrats / ABI
-# ===========================
+# ==============================
+# 📜 Setup Web3 / contrats / ABI
+# ==============================
 
+BSC_RPC = os.getenv("BSC_RPC", "https://bsc-dataseed.binance.org/")
 w3 = Web3(Web3.HTTPProvider(BSC_RPC))
-CONTRACT_MRS = Web3.to_checksum_address(MRS_TOKEN_ADDRESS)
-PANCAKE_ROUTER = Web3.to_checksum_address(PANCAKE_ROUTER_RAW)
-WBNB = Web3.to_checksum_address(WBNB_RAW)
+# w3.middleware_onion.inject(ProofOfAuthorityMiddleware, layer=0)
+# w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+CONTRACT_MRS = Web3.to_checksum_address("0x14e3598571F4683CEA1Ff2a917F4a3354Cd5842b")
+PANCAKE_ROUTER = Web3.to_checksum_address("0x10ED43C718714eb63d5aA57B78B54704E256024E")
+WBNB = Web3.to_checksum_address("0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c")
 
 PANCAKE_ROUTER_ABI = json.loads("""[
   {"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"payable","type":"function"},
@@ -75,328 +76,295 @@ router = w3.eth.contract(address=PANCAKE_ROUTER, abi=PANCAKE_ROUTER_ABI)
 token = w3.eth.contract(address=CONTRACT_MRS, abi=ERC20_ABI)
 
 # ==========================
-# UTILITAIRES
+# ⚙️  UTILITAIRES
 # ==========================
 
-def load_private_key_pair(fernet_path: str, enc_path: str) -> str:
-    if not os.path.exists(fernet_path) or not os.path.exists(enc_path):
-        raise FileNotFoundError(f"Key files not found: {fernet_path} or {enc_path}")
-    with open(fernet_path, "rb") as f:
+def log(message: str):              # Affiche dans le terminal avec date et heure.
+    now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    print(f"{now} {message}")
+
+# ==========================
+# 👛  WALLET
+# ==========================
+
+def load_private_key(key_path, enc_path):
+    with open(key_path,"rb") as f:
         fernet_key = f.read().strip()
     cipher = Fernet(fernet_key)
-    with open(enc_path, "rb") as f:
+    with open(enc_path,"rb") as f:
         encrypted = f.read()
-    priv = cipher.decrypt(encrypted).decode().strip()
-    return priv
+    return cipher.decrypt(encrypted).decode().strip()
 
-def to_wei(amount, decimals=18) -> int:
-    return int((Decimal(amount) * (Decimal(10) ** decimals)).to_integral_value())
+def get_wallet_address(private_key):
+    return Web3.to_checksum_address(Account.from_key(private_key).address)
 
-def from_wei(amount_int, decimals=18) -> Decimal:
-    return Decimal(amount_int) / (Decimal(10) ** decimals)
+def get_balances(wallet):
+    bnb = from_wei(w3.eth.get_balance(wallet))
+    mrs_wei = token.functions.balanceOf(wallet).call()
+    decimals = token.functions.decimals().call()
+    mrs_decimal = from_wei(mrs_wei, decimals)
+    return bnb, mrs_decimal, mrs_wei
 
-def get_bnb_price_h1() -> Tuple[Optional[Decimal], Optional[Decimal]]:
-    """Récupère prix BNB et % changement 1h via Dexscreener (WBNB)."""
+# ====================================
+# 🎯 TX helpers (approve / buy / sell)
+# ====================================
+
+def to_wei(amount, decimals=18):
+    return int((Decimal(amount)*(10**decimals)).to_integral_value())
+
+def from_wei(amount, decimals=18):
+    return Decimal(amount)/(10**decimals)
+
+def gas_fee_usd(bnb_price):
+    fee_wei = int(GWEI*1e9*GAS_LIMIT_EST)
+    fee_bnb = Decimal(fee_wei)/Decimal(1e18)
+    return fee_bnb*bnb_price
+
+def get_bnb_price_h1():
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{WBNB}"
     try:
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{WBNB}"
-        r = requests.get(url, timeout=HTTP_TIMEOUT)
-        j = r.json()
-        pair = j.get("pairs", [])[0]
-        price = Decimal(str(pair.get("priceUsd", "0")))
-        change = Decimal(str(pair.get("priceChange", {}).get("h1", "0")))
-        return price, change
-    except Exception as e:
-        print("get_bnb_price_h1 error:", e)
+        r = requests.get(url, timeout=8).json()
+        pair = r["pairs"][0]
+        return Decimal(str(pair["priceUsd"])), float(pair["priceChange"]["h1"])
+    except:
         return None, None
 
-# ====================================== 
-# Dernière transaction MRS via EtherScan
-# ======================================
-
-def get_last_mrs_tx_timestamp() -> int | None:
-    """
-    Utilise l'API V2 de BscScan pour récupérer la timestamp de la dernière transaction du token MRS.
-    """
+def get_mrs_last_tx():
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{CONTRACT_MRS}"
     try:
-        url = (
-            f"https://api.etherscan.io/v2/api"
-            f"?chainid=56"                                      # 56 = BSC
-            f"&module=account"
-            f"&action=tokentx"
-            f"&contractaddress={CONTRACT_MRS}"
-            f"&page=1&offset=1&sort=desc"
-            f"&apikey={ETHSCAN_API_KEY}"
-        )
-        r = requests.get(url, timeout=10)
-        data = r.json()
-
-        if data.get("status") != "1" or "result" not in data or not data["result"]:
-            print("❌ Clé API invalide ou aucun résultat.")
-            print("Message:", data.get("message"))
-            return None
-
-        last_tx = data["result"][0]
-        timestamp_unix = int(last_tx["timeStamp"])
-        print(f"⏱ Dernière TX MRS détectée : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_unix))}")
-        return timestamp_unix
-
-    except Exception as e:
-        print(f"❌ Erreur lors de l'appel API : {e}")
+        j = requests.get(url,timeout = 8).json()
+        pairs = j.get("pairs",[])
+        if not pairs: return None
+        pair = next((p for p in pairs if p.get("chain")=="bsc"),pairs[0])
+        h1 = pair.get("txns",{}).get("h1",{})
+        total = h1.get("buys",0)+h1.get("sells",0)
+        return total
+    except:
         return None
 
-# =================================
-# TX helpers (approve / buy / sell)
-# =================================
-
-def current_gas_fee_usd(bnb_price_usd: Decimal, gas_limit: int = GAS_LIMIT_SWAP) -> Tuple[Decimal, int]:
-    gas_price_wei = int(GWEI * Decimal(10**9))
-    fee_wei = gas_price_wei * gas_limit
-    fee_bnb = Decimal(fee_wei) / Decimal(10**18)
-    fee_usd = fee_bnb * bnb_price_usd
-    return fee_usd, gas_price_wei
-
-def ensure_approval(wallet_addr: str, private_key: str, amount_token_wei: int) -> bool:
-    try:
-        allowance = token.functions.allowance(wallet_addr, PANCAKE_ROUTER).call()
-    except Exception as e:
-        print("Allowance read error:", e)
-        allowance = 0
-    if allowance >= amount_token_wei:
-        return True
-    approve_amount = int(amount_token_wei)
-    nonce = w3.eth.get_transaction_count(wallet_addr, "pending")
-    tx = token.functions.approve(PANCAKE_ROUTER, approve_amount).build_transaction({
-        "from": wallet_addr,
-        "nonce": nonce,
-        "gas": GAS_LIMIT_APPROVE,
-        "gasPrice": int(GWEI * Decimal(10**9)),
-        "chainId": 56
-    })
-    print("[DEBUG] Approve tx prepared (DRY_RUN=%s): gas=%s gasPrice=%s wei amount=%s" % (DRY_RUN, tx["gas"], tx["gasPrice"], approve_amount))
+def wait_random():
+    delay = random.randint(RANDOM_MIN,RANDOM_MAX)
     if DRY_RUN:
-        return True
-    signed = w3.eth.account.sign_transaction(tx, private_key)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-    print("Approve tx sent:", tx_hash.hex())
-    return True
-# ====================
-# BUY :     MRS -> BNB
-# ====================
+        log(f"⏳ Attente aléatoire de {DRY_RUN_SLEEP//60} min avant prochaine tx...")
+    else:
+        log(f"⏳ Attente aléatoire de {delay//60} min avant prochaine tx...")
+    time.sleep(delay if not DRY_RUN else DRY_RUN_SLEEP)
 
-def buy_with_bnb(wallet_addr: str, private_key: str, bnb_amount: Decimal):
-    path = [WBNB, CONTRACT_MRS]
-    amount_in_wei = to_wei(bnb_amount, 18)
+# ==============================
+# ✔️  Approve Wallets "infinity"
+# ==============================
+
+# def ensure_approval(wallet, private_key, amount_token_wei):
+#     allowance = token.functions.allowance(wallet,PANCAKE_ROUTER).call()
+#     if allowance >= amount_token_wei:
+#         return
+
+#     tx = token.functions.approve(PANCAKE_ROUTER, amount_token_wei).build_transaction({
+#         "from":wallet,
+#         "nonce":w3.eth.get_transaction_count(wallet),
+#         "gas": GAS_LIMIT_APPROVE,
+#         "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
+#         "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
+#         "chainId": 56
+#     })
+
+#     if DRY_RUN:
+#         log(f"[DRY_RUN] approve tx: {tx}")
+#         return
+    
+#     signed=w3.eth.account.sign_transaction(tx,private_key)
+#     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+#     log(f"APPROVE sent: {tx_hash.hex()}")
+
+# ==============================================
+
+# def ensure_approval(wallet, private_key):
+#     """
+#     Approve infini une seule fois pour PancakeSwap.
+#     Ne refait rien si l'allowance est déjà suffisante.
+#     """
+#     spender = PANCAKE_ROUTER
+#     max_approval = 2**256 - 1
+
+#     try:
+#         current_allow = token.functions.allowance(wallet, spender).call()
+#         # Déjà approuvé → rien à faire
+#         if current_allow > 10**30:
+#             log(f"[{ts()}] ✓ Allowance déjà infinie, aucun approve nécessaire.")
+#             return True
+#         log(f"[{ts()}] ⚠️ Allowance insuffisante → Approve Infinity…")
+
+#         # Prépare la TX d’approve
+#         tx = token.functions.approve(spender, max_approval).build_transaction({
+#             "from": wallet,
+#             "nonce": w3.eth.get_transaction_count(wallet),
+#             "gas": 120000,
+#             "gasPrice": w3.to_wei(GWEI, "gwei"),
+#             "chainId": 56,
+#         })
+
+#         if DRY_RUN:
+#             log(f"[DRY_RUN] approve infinity tx: {tx}")
+#             return True
+
+#         # Signature & envoi
+#         signed = w3.eth.account.sign_transaction(tx, private_key)
+#         tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+#         log(f"[{ts()}] ✔️ Approve Infinity envoyé ! Hash: {tx_hash.hex()}")
+#         return True
+
+#     except Exception as e:
+#         log(f"[{ts()}] ❌ Erreur approve: {e}")
+#         return False
+
+def approve_infinity(wallet, private_key):  
+    MAX_UINT = int(2**256 - 1)
+
     try:
-        amounts = router.functions.getAmountsOut(amount_in_wei, path).call()
-        expected_token = amounts[-1]
+        current_allowance = token.functions.allowance(wallet, PANCAKE_ROUTER).call()
+        if current_allowance >= MAX_UINT:
+            log(f"🎯 Wallet {wallet} already approved (infinity)")
+            return
+        
+        tx = token.functions.approve(PANCAKE_ROUTER, MAX_UINT).build_transaction({
+            "from": wallet,
+            "nonce": w3.eth.get_transaction_count(wallet),
+            "gas": 100000,
+            "maxFeePerGas": int(GWEI*1e9),
+            "maxPriorityFeePerGas": int(GWEI*1e9),
+            "chainId": 56
+        })
+
+        # Signature & envoi
+        signed = w3.eth.account.sign_transaction(tx, private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        log(f"✔️ APPROVE INFINITY sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+        time.sleep(10)
+
     except Exception as e:
-        print("getAmountsOut failed (buy):", e)
-        expected_token = 0
-    amount_out_min = int(Decimal(expected_token) * (Decimal(1) - SLIPPAGE))
-    nonce = w3.eth.get_transaction_count(wallet_addr, "pending")
+        log(f"⚠️ Erreur lors de l'approve infinity pour {wallet}: {e}")
+        time.sleep(5)
+
+# =======================
+# ✅  BUY :    MRS -> BNB
+# =======================
+
+def buy(wallet, private_key, bnb_amount):
+    amount_in_wei = to_wei(bnb_amount)
+    path = [WBNB,CONTRACT_MRS]
+
+    amounts = router.functions.getAmountsOut(amount_in_wei, path).call()
+    min_out = int(amounts[-1] * (1 - SLIPPAGE))
+
     tx = router.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(
-        amount_out_min,
-        path,
-        wallet_addr,
-        int(time.time() + 180)
+        min_out,path,wallet,int(time.time())+120
     ).build_transaction({
-        "from": wallet_addr,
-        "value": amount_in_wei,
-        "nonce": nonce,
-        "gas": GAS_LIMIT_SWAP,
-        "gasPrice": int(GWEI * Decimal(10**9)),
+        "from":wallet,
+        "value":amount_in_wei,
+        "gas":GAS_LIMIT_EST,
+        "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
+        "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
+        "nonce":w3.eth.get_transaction_count(wallet),
         "chainId": 56
     })
-    print("[DEBUG] BUY tx prepared (DRY_RUN=%s): spend %s BNB -> amount_out_min %s" % (DRY_RUN, bnb_amount, amount_out_min))
-    if DRY_RUN:
-        return None
-    signed = w3.eth.account.sign_transaction(tx, private_key)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-    print("BUY tx sent:", tx_hash.hex())
-    return tx_hash.hex()
 
-# ====================
-# SELL :    BNB -> MRS
-# ====================
+    if DRY_RUN: 
+        log(f"[DRY_RUN] BUY {bnb_amount:.5f} BNB tx prepared. min_out={from_wei(min_out, token.functions.decimals().call()):.2f}")
+    else:
+        # Signature & envoi
+        signed = w3.eth.account.sign_transaction(tx,private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        log(f"✅ BUY sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
 
-def sell_mrs_amount(wallet_addr: str, private_key: str, amount_token_wei: int):
-    path = [CONTRACT_MRS, WBNB]
-    ensure_approval(wallet_addr, private_key, amount_token_wei)
-    try:
-        amounts_out = router.functions.getAmountsOut(amount_token_wei, path).call()
-        expected_bnb_out = amounts_out[-1]
-        amount_out_min = int(Decimal(expected_bnb_out) * (Decimal(1) - SLIPPAGE))
-    except Exception as e:
-        print("getAmountsOut failed (sell):", e)
-        amount_out_min = 0
-    nonce = w3.eth.get_transaction_count(wallet_addr, "pending")
-    tx = router.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-        amount_token_wei,
-        int(amount_out_min),
-        path,
-        wallet_addr,
-        int(time.time() + 180)
+# =======================
+# 🟥  SELL :   BNB -> MRS
+# =======================
+
+def sell(wallet, private_key, token_wei):
+    path = [CONTRACT_MRS,WBNB]
+    amounts = router.functions.getAmountsOut(token_wei, path).call()
+    min_out = int(amounts[-1] * (1 - SLIPPAGE))
+    
+    tx=router.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+        token_wei,min_out,path,wallet,int(time.time())+120
     ).build_transaction({
-        "from": wallet_addr,
-        "nonce": nonce,
-        "gas": GAS_LIMIT_SWAP,
-        "gasPrice": int(GWEI * Decimal(10**9)),
+        "from":wallet,
+        "gas":GAS_LIMIT_EST,
+        "maxFeePerGas": w3.to_wei(GWEI, "gwei"),
+        "maxPriorityFeePerGas": w3.to_wei(GWEI, "gwei"),
+        "nonce":w3.eth.get_transaction_count(wallet),
         "chainId": 56
     })
-    print("[DEBUG] SELL tx prepared (DRY_RUN=%s): token_units=%s amount_out_min=%s" % (DRY_RUN, amount_token_wei, amount_out_min))
-    if DRY_RUN:
-        return None
-    signed = w3.eth.account.sign_transaction(tx, private_key)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-    print("SELL tx sent:", tx_hash.hex())
-    return tx_hash.hex()
 
-# ==========================
-# MAIN LOOP
-# ==========================
+    if DRY_RUN: 
+        log(f"[DRY_RUN] SELL {token_wei} MRS tx prepared. min_out={from_wei(min_out, token.functions.decimals().call()):.2f}")
+    else:
+        # Signature & envoi
+        signed = w3.eth.account.sign_transaction(tx,private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        log(f"🟥 SELL sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
 
-def in_active_hours(now=None):
-    if now is None:
-        now = time.localtime()
-    return (now.tm_hour >= ACTIVE_START_HOUR) and (now.tm_hour < ACTIVE_END_HOUR)
+# =====================
+# 🔁  Boucle principale
+# =====================
 
 def main_loop():
     wallets = []
-    for idx, (kf, ef) in enumerate(WALLETS_KEYS):
-        try:
-            priv = load_private_key_pair(kf, ef)
-            addr = Account.from_key(priv).address
-            wallets.append({"priv": priv, "addr": Web3.to_checksum_address(addr)})
-            print(f"Wallet {idx+1} loaded: {addr}")
-        except Exception as e:
-            print(f"Erreur chargement wallet {idx+1}: {e}")
-    if not wallets:
-        print("Aucun wallet chargé, abort.")
-        return
-
-    wallet_count = len(wallets)
-    current_idx = 0
-    print("Bot démarré. DRY_RUN =", DRY_RUN)
-
+    for kp,ep in zip(KEY_PATHS,ENC_PATHS):
+        pk = load_private_key(kp,ep)
+        addr = get_wallet_address(pk)
+        wallets.append({"pk":pk,"addr":addr})
+        log(f"Wallet loaded: {addr}")
+        if not DRY_RUN:
+            approve_infinity(addr, pk)
+    log(f"Bot démarré. DRY_RUN = {DRY_RUN}")
+    
+    wallet_idx = 0
+    first_tx = True
     while True:
-        try:
-            now = time.localtime()
-            if not in_active_hours(now):
-                print("Hors plage active, sleep 10 min...")
-                time.sleep(10 * 60)
-                continue
+        wallet = wallets[wallet_idx]
+        wallet_idx = (wallet_idx+1)%len(wallets)
+        pk, addr = wallet["pk"], wallet["addr"]
 
-            last_tx_ts = get_last_mrs_tx_timestamp()
-            if last_tx_ts is None:
-                print("BscScan returned None for last tx -> wait 10 minutes.")
-                time.sleep(DEXSCR_NULL_WAIT)
-                continue
+        bnb_price, bnb_change=get_bnb_price_h1()
+        if bnb_price is None: 
+            log(f"Erreur BNB price, retry in {RETRY_WAIT_SECONDS} min."); time.sleep(RETRY_WAIT_SECONDS * 60); continue
 
-            wait_minutes = random.randint(MIN_TRIGGER_MIN, MAX_TRIGGER_MIN)
-            wait_seconds = wait_minutes * 60
-            target_ts = int(last_tx_ts) + wait_seconds
-            now_ts = int(time.time())
-            to_wait = target_ts - now_ts
+        if first_tx:
+            last_tx = get_mrs_last_tx()
+            if last_tx is None:
+                log("Dexscreener returned None -> trade direct")
+            elif last_tx>0:
+                log(f"{last_tx} txs dans h1 -> attente aléatoire {RANDOM_MIN//60}-{RANDOM_MAX//60} min avant première tx")
+                wait_random()
+            first_tx = False
+        else:
+            wait_random()
+        
+        bnb_bal, mrs_bal_decimal, mrs_bal_wei=get_balances(addr)
+        bnb_value_usd = bnb_bal*bnb_price
+        log(f"Wallet {addr}: BNB ${bnb_value_usd:.2f}, {mrs_bal_decimal:.2f} MRS")
+        
+        if bnb_value_usd<MIN_BNB_USD_THRESHOLD and mrs_bal_wei>0:
+            sell_amount = int(mrs_bal_wei*SELL_PORTION)
+            log(f"BNB < ${MIN_BNB_USD_THRESHOLD}, SELL {SELL_PORTION*100}% MRS")
+            sell(addr,pk,sell_amount)
+            continue
 
-            if to_wait > 0:
-                print(f"Dernière tx à {time.ctime(last_tx_ts)}. Attente planifiée = {wait_minutes} min -> target {time.ctime(target_ts)}")
-                check_interval = 30
-                while to_wait > 0:
-                    new_last = get_last_mrs_tx_timestamp()
-                    if new_last is None:
-                        print("BscScan renvoie None pendant attente -> attendre 10 minutes puis re-eval.")
-                        time.sleep(DEXSCR_NULL_WAIT)
-                        break
-                    if new_last > last_tx_ts:
-                        print(f"Nouvelle tx détectée à {time.ctime(new_last)} -> reset timer.")
-                        last_tx_ts = new_last
-                        wait_minutes = random.randint(MIN_TRIGGER_MIN, MAX_TRIGGER_MIN)
-                        wait_seconds = wait_minutes * 60
-                        target_ts = int(last_tx_ts) + wait_seconds
-                        to_wait = target_ts - int(time.time())
-                        print(f"Nouveau target à {time.ctime(target_ts)} (attente {wait_minutes} min)")
-                        continue
-                    if to_wait <= 300:
-                        bnb_price, _ = get_bnb_price_h1()
-                        if bnb_price is not None:
-                            fee_usd, _ = current_gas_fee_usd(bnb_price, GAS_LIMIT_SWAP)
-                            if fee_usd > MAX_GAS_USD:
-                                print(f"Gas trop élevé ({fee_usd}$) -> attendre {DEXSCR_NULL_WAIT}s puis retenter.")
-                                time.sleep(DEXSCR_NULL_WAIT)
-                                break
-                    sleep_for = min(check_interval, max(1, to_wait))
-                    time.sleep(sleep_for)
-                    to_wait = target_ts - int(time.time())
+        if bnb_change>0:
+            buy_amount = bnb_bal*BUY_PORTION
+            if buy_amount>0: 
+                log(f"BNB UP {bnb_change:.2f}% (${bnb_price:.2f}) : BUY {buy_amount:.5f} BNB -> MRS")
+                buy(addr,pk,buy_amount)
+        else:
+            if mrs_bal_wei>0:
+                sell_amount = int(mrs_bal_wei*SELL_PORTION)
+                log(f"BNB DOWN {bnb_change:.2f}% (${bnb_price:.2f}) -> SELL {SELL_PORTION*100}% MRS")
+                sell(addr,pk,sell_amount)
 
-                last_after = get_last_mrs_tx_timestamp()
-                if last_after is None:
-                    print("Après attente, pas de nouvelle tx détectée. On continue la boucle principale.")
-                    last_after = last_tx_ts  # réutiliser l'ancienne valeur
-                if last_after > target_ts:
-                    continue
-
-            wallet_obj = wallets[current_idx]
-            wallet_addr = wallet_obj["addr"]
-            priv = wallet_obj["priv"]
-            print(f"=== Execution avec wallet {current_idx+1} : {wallet_addr} ===")
-
-            bnb_price, bnb_change = get_bnb_price_h1()
-            if bnb_price is None:
-                print("Impossible récupérer prix BNB avant action -> retry plus tard.")
-                time.sleep(RETRY_WAIT_SECONDS)
-                continue
-
-            fee_usd_now, gas_price_wei = current_gas_fee_usd(bnb_price, GAS_LIMIT_SWAP)
-            print(f"Gas cost estimé: ${fee_usd_now:.6f} (gasPrice {gas_price_wei} wei)")
-            if fee_usd_now > MAX_GAS_USD:
-                print(f"Gas {fee_usd_now} > seuil {MAX_GAS_USD} -> retry in {RETRY_WAIT_SECONDS}s")
-                time.sleep(RETRY_WAIT_SECONDS)
-                continue
-
-            bnb_bal = from_wei(w3.eth.get_balance(wallet_addr), 18)
-            mrs_bal_units = token.functions.balanceOf(wallet_addr).call()
-            try:
-                mrs_decimals = token.functions.decimals().call()
-            except Exception:
-                mrs_decimals = 18
-            mrs_bal = from_wei(mrs_bal_units, mrs_decimals)
-
-            bnb_value_usd = bnb_bal * bnb_price
-            print(f"Balances wallet: {bnb_bal:.6f} BNB (~${bnb_value_usd:.2f}), {mrs_bal:.6f} MRS")
-
-            if bnb_value_usd < MIN_BNB_USD_THRESHOLD and mrs_bal_units > 0:
-                print(f"BNB < ${MIN_BNB_USD_THRESHOLD} -> vendre {int(SELL_PORTION*100)}% MRS")
-                sell_amount = int(Decimal(mrs_bal_units) * SELL_PORTION)
-                sell_mrs_amount(wallet_addr, priv, sell_amount)
-            else:
-                if Decimal(bnb_change) > 0:
-                    buy_amount_bnb = bnb_bal * BUY_PORTION
-                    if buy_amount_bnb <= Decimal("0.0000001"):
-                        print("Montant BNB trop petit pour acheter -> skip")
-                    else:
-                        print(f"BNB en hausse -> acheter pour {buy_amount_bnb:.6f} BNB (~${(buy_amount_bnb*bnb_price):.2f})")
-                        buy_with_bnb(wallet_addr, priv, buy_amount_bnb)
-                else:
-                    if mrs_bal_units == 0:
-                        print("Pas de MRS à vendre.")
-                    else:
-                        sell_amount = int(Decimal(mrs_bal_units) * SELL_PORTION)
-                        print(f"BNB en baisse -> vendre {int(SELL_PORTION*100)}% soit {sell_amount} unités")
-                        sell_mrs_amount(wallet_addr, priv, sell_amount)
-
-            current_idx = (current_idx + 1) % wallet_count
-            time.sleep(5)
-
-        except Exception as e:
-            print("Erreur non gérée dans main loop:", e)
-            traceback.print_exc()
-            print(f"Attente {RETRY_WAIT_SECONDS}s avant retry.")
-            time.sleep(RETRY_WAIT_SECONDS)
-
-if __name__ == "__main__":
+if __name__=="__main__":
     try:
-        # ts = get_last_mrs_tx_timestamp()               # teste
-        # print("Dernière tx timestamp:", ts)
         main_loop()
     except KeyboardInterrupt:
-        print("🛑 Arrêt manuel du Bot !")
+        print("/n")
+        log("🛑 Arrêt manuel du bot")
