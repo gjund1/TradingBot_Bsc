@@ -7,6 +7,8 @@ from cryptography.fernet import Fernet
 from web3 import Web3
 from eth_account import Account
 from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
+from key.wallets import KEY_PATHS, ENC_PATHS, nameWallets
+from key.email import send_mail
 
 # =========================
 # 🧩 Configuration initiale
@@ -14,41 +16,27 @@ from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
 
 DRY_RUN = True                 # True MODE ESSAI, False pour vrai trading
 DRY_RUN_SLEEP = 10              # 1 min (1 * 60)  /  10s (10)
-TRADING = False                  # Buy or Sell (On/Off)
+WALLETS_RANDOM = True           # Wallets aleatoire
+TRADING = True                  # Buy or Sell (On/Off)
 APPROVE = False                 # Approve Wallets Infinity
-H1 = "m5"                       # "h1" ou "m5"
-
-KEY_PATHS = [
-    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.key")
-    #os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.key"),
-]
-ENC_PATHS = [
-    os.path.expanduser("~/Documents/code/BotMRS/key/wallet1.enc")
-    #os.path.expanduser("~/Documents/code/BotMRS/key/wallet2.enc"),
-]
-
-nameWallets = {"Account1": "9D158"
-               #"Account2": "3T9BU",
-              }
+H1 = "h1"                       # "h1" ou "m5"
 
 BUY_PORTION = Decimal("0.233")                      # ~1/5 BNB wallet
 SELL_PORTION = Decimal("0.733")                     # ~3/4 MRS wallet
 MIN_BNB_USD_THRESHOLD = Decimal("5.0")
 MIN_MRS_USD_THRESHOLD = Decimal("5.0")
-MAX_MRS_THRESHOLD = Decimal("150.0")                # ~$150
-MAX_GAS_USD = Decimal("0.011")
+# MAX_MRS_USD_SELL = Decimal("150.0")                 # ~$150
+MAX_GAS_USD = Decimal("0.01")
 GWEI = 0.05                                         # Frais de Gas
-GAS_LIMIT = 170000
+GAS_LIMIT = 170000                                  # 170.000 / buy 140.000 / Sell 170.000
 GAS_LIMIT_APPROVE = 100000
 SLIPPAGE = 0.01                                     # 1% buy/sell slippage
 
-START_HOUR = 6                                      # 6h - 22h
-END_HOUR = 22
-RANDOM_MIN = 60*(60+2)  if H1=="h1" else 60*5       # tx (h1) apres 1h02 a 1h57 / 60 * (60 + 2) / 60 * (60 + 57)
-RANDOM_MAX = 60*(60+57) if H1=="h1" else 60*9       # tx (m5) apres 5-9 min
+START_HOUR, END_HOUR = 6, 21                        # 6h - 22h (+1h UTC)
+RANDOM_MIN = 60*(35)  if H1=="h1" else 60*5         # tx (h1) apres 35 min a 1h35 / 60 * (35) / 60 * (60 + 45)
+RANDOM_MAX = 60*(60+45) if H1=="h1" else 60*9       # tx (m5) apres 5-9 min
 
-RETRY_WAIT_SECONDS = 5                              # 5s
-random.seed()
+RETRY_WAIT_SECONDS = 15                             # 15s
 getcontext().prec = 28                              # Decimal : 28
 
 # ==============================
@@ -90,12 +78,30 @@ def log(message: str):
     print(f"{now} {message}")
 
 def ping():
-    try:
-        payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
-        r = requests.post("https://bsc-dataseed.binance.org/", json = payload, timeout = 3)
-        return "result" in r.json()
-    except:
-        return False
+    while True:
+        try:
+            payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
+            r = requests.post("https://bsc-dataseed.binance.org/", json=payload, timeout=3)
+            r.raise_for_status()  # lève une erreur si le HTTP status n'est pas 200
+            if "result" in r.json():
+                return True
+        except Exception as e:
+            log(f"⚠️ Ping error: {e}")
+        
+        log(f"🌐 Ping failed, retry in {RETRY_WAIT_SECONDS} min.")
+        if False:
+            mail(f"🌐 Ping failed, retry in {RETRY_WAIT_SECONDS} min.")
+        time.sleep(RETRY_WAIT_SECONDS * 60)
+
+def in_active_hours():
+    h = datetime.now().hour
+    return (START_HOUR <= h < END_HOUR) or (2 <= h < 3)
+
+# Message de l'email
+def mail(resultats):
+        corps = ""
+        subject = f"MRS Trading Bot (H1) - {resultats}"
+        send_mail(corps, subject)
 
 # ==========================
 # 👛  WALLET
@@ -141,17 +147,22 @@ def adjust_gas(current_gwei):
     MAX_JUMP = 10.0                                     # +1000%
     try:
         new_gwei = float(w3.eth.gas_price) / 1e9
+        var_gwei = abs(new_gwei - current_gwei) / current_gwei
+        if new_gwei != current_gwei:
+            mail(f"✨ Variation du Gwei {new_gwei:.3f} ({var_gwei * 100:.0f}%)")
         # 🚫 Si variation > +1000% → on ignore
-        if abs(new_gwei - current_gwei) / current_gwei > MAX_JUMP:
+        if var_gwei > MAX_JUMP:
             log(f"⚠️ Variation Gas trop élevée {new_gwei:.3f}, Gwei NON modifié !")
             return current_gwei
-        if abs(new_gwei - current_gwei) / current_gwei > VARIATION_GAS_THRESHOLD:
+        if var_gwei > VARIATION_GAS_THRESHOLD:
             log(f"🔄 Gwei ajusté : {current_gwei:.3f} Gwei -> {new_gwei:.3f} Gwei")
             return new_gwei
         # log(f"✅ Gwei stable: {current_gwei:.3f} Gwei")
+        # mail(f"✅ Gwei stable: {current_gwei:.3f} Gwei")
         return current_gwei
     except Exception as e:
         log(f"⚠️ Erreur fetch Gwei: {e}")
+        mail(f"⚠️ Erreur fetch Gwei: {e}")
         return current_gwei
 
 def gas_fee_usd(bnb_price, gwei):
@@ -233,8 +244,10 @@ def approve_infinity(wallet, private_key, gwei):
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt.status == 1:
             log(f"✅ APPROVE CONFIRMÉ : https://bscscan.com/tx/0x{tx_hash.hex()}")
+            mail(f"✅ APPROVE CONFIRMÉ : https://bscscan.com/tx/0x{tx_hash.hex()}")
         else:
             log("❌ Approve échoué")
+            mail("❌ Approve échoué")
         time.sleep(10)
 
     except Exception as e:
@@ -246,6 +259,13 @@ def approve_infinity(wallet, private_key, gwei):
 # =======================
 
 def buy(wallet, private_key, bnb_amount, gwei):
+    bnb_price, _ = get_bnb_price()
+    gas_usd = gas_fee_usd(bnb_price, gwei)
+    if gas_usd > MAX_GAS_USD:
+        log(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — BUY annulé")
+        mail(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — BUY annulé")
+        return
+    
     amount_in_wei = to_wei(bnb_amount)
     path = [WBNB, CONTRACT_MRS]
     amounts = router.functions.getAmountsOut(amount_in_wei, path).call()
@@ -270,19 +290,31 @@ def buy(wallet, private_key, bnb_amount, gwei):
         if TRADING:
             signed = w3.eth.account.sign_transaction(tx, private_key)
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            log(f"✅ BUY sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt.status == 1:
+                log(f"✅ BUY sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+            else:
+                log(f"⛔ BUY FAILED : https://bscscan.com/tx/0x{tx_hash.hex()}")
+                mail(f"⛔ BUY FAILED : https://bscscan.com/tx/0x{tx_hash.hex()}")
 
 # =======================
 # 🟥  SELL :   BNB -> MRS
 # =======================
 
 def sell(wallet, private_key, token_wei, gwei):
+    bnb_price, _ = get_bnb_price()
+    gas_usd = gas_fee_usd(bnb_price, gwei)
+    if gas_usd > MAX_GAS_USD:
+        log(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — SELL annulé")
+        mail(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — SELL annulé")
+        return
+
     path = [CONTRACT_MRS,WBNB]
     amounts = router.functions.getAmountsOut(token_wei, path).call()
     min_out = int(amounts[-1] * (1 - SLIPPAGE))
     decimals = token.functions.decimals().call()
-    token_amount = from_wei(token_wei, decimals) 
-    
+    token_amount = from_wei(token_wei, decimals)
+
     tx = router.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
         token_wei,min_out,path,wallet,int(time.time())+120
     ).build_transaction({
@@ -301,7 +333,12 @@ def sell(wallet, private_key, token_wei, gwei):
         if TRADING:
             signed = w3.eth.account.sign_transaction(tx, private_key)
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            log(f"🟥 SELL sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            if receipt.status == 1:
+                log(f"🟥 SELL sent: https://bscscan.com/tx/0x{tx_hash.hex()}")
+            else:
+                log(f"⛔ SELL FAILED : https://bscscan.com/tx/0x{tx_hash.hex()}")
+                mail(f"⛔ SELL FAILED : https://bscscan.com/tx/0x{tx_hash.hex()}")
 
 # =====================
 # 🔁  Boucle principale
@@ -309,7 +346,8 @@ def sell(wallet, private_key, token_wei, gwei):
 
 def main_loop():
     wallets = []
-    gwei = adjust_gas(GWEI)
+    gwei = GWEI
+    print("")
     for kp,ep in zip(KEY_PATHS, ENC_PATHS):
         pk = load_private_key(kp, ep)
         addr = get_wallet_address(pk)
@@ -322,23 +360,31 @@ def main_loop():
         log(f"🤖 Bot démarré {"(H1)" if H1 == "h1" else "(m5)"} - MODE ESSAI {"ON 💡" if DRY_RUN else "OFF" } ({gwei:.2f} Gwei)")
     else:
         log(f"🤖 Bot démarré {"(H1)" if H1 == "h1" else "(m5)"} - Trading {"ON" if TRADING else "OFF"} ({gwei:.2f} Gwei)")
+        mail(f"🤖 Bot démarré {"(H1)" if H1 == "h1" else "(m5)"} - Trading {"ON" if TRADING else "OFF"} ({gwei:.2f} Gwei)")
     
     wallet_idx = 0
     first_tx = True
     while True:
-        while not ping(): 
-            log(f"🌐 Ping failed, retry in {RETRY_WAIT_SECONDS} min.")
-            time.sleep(RETRY_WAIT_SECONDS * 60)
+        if not in_active_hours():
+            log(f"🕒 Hors plage horaire ({START_HOUR}h-{END_HOUR}h). Vérification dans 1 heures.")
+            time.sleep(60 * 60)
+            continue
+        ping()
         if get_wallet_name(addr) == "Account22":
             gwei = adjust_gas(GWEI)
+        
+        if WALLETS_RANDOM:
+            if wallet_idx == datetime.today().weekday() or wallet_idx == 2*datetime.today().weekday() or wallet_idx == random.randint(0, 13):
+                wallet_idx = random.randint(0, 13)
         wallet = wallets[wallet_idx]
         wallet_idx = (wallet_idx+1)%len(wallets)
         pk, addr = wallet["pk"], wallet["addr"]
 
         bnb_price, bnb_change = get_bnb_price()
         mrs_price = get_mrs_price()
-        if bnb_price is None: 
+        if bnb_price is None or bnb_change is None or mrs_price is None:
             log(f"❌ Erreur BNB price, retry in {RETRY_WAIT_SECONDS} min.")
+            mail(f"❌ Erreur BNB price, retry in {RETRY_WAIT_SECONDS} min.")
             time.sleep(RETRY_WAIT_SECONDS * 60)
             continue
 
@@ -346,17 +392,15 @@ def main_loop():
             last_tx = get_mrs_last_tx()
             if last_tx is None:
                 log("❌ Dexscreener returned None -> trade direct")
+                mail("❌ Dexscreener returned None -> trade direct")
             elif last_tx > 0:
-                log(f"⏳ {last_tx} txs dans h1 -> attente aléatoire {RANDOM_MIN//60}-{RANDOM_MAX//60} min avant prochaine tx")
+                log(f"⏳ {last_tx} txs dans h1 -> attente aléatoire {RANDOM_MIN//60}-{RANDOM_MAX//60} min avant première tx")
                 wait_random()
-            first_tx = False                                     # Si 1ere transation -> first_tx = False                                                                # A FAIRE !
+            first_tx = False
         else:
             wait_random()
             
-        while not ping(): 
-            log(f"🌐 Ping failed, retry in {RETRY_WAIT_SECONDS} min.")
-            time.sleep(RETRY_WAIT_SECONDS * 60)
-        
+        ping()
         bnb_bal, mrs_bal_decimal, mrs_bal_wei = get_balances(addr)
         bnb_value_usd = bnb_bal * bnb_price                     # Wallet bnb USB
         mrs_value_usd = mrs_bal_decimal * mrs_price             # Wallet MRS USB
@@ -378,15 +422,17 @@ def main_loop():
             buy(addr, pk, buy_amount, gwei)
             continue
 
+        # BUY
         if bnb_change >= 0:
             buy_amount = bnb_bal * BUY_PORTION
             if buy_amount > 0: 
-                log(f"↗️​  BNB Up +{bnb_change:.2f}% (${bnb_price:.2f}) : BUY {buy_amount:.5f} BNB -> MRS")
+                log(f"↗️  BNB Up +{bnb_change:.2f}% (${bnb_price:.2f}) : BUY {buy_amount:.5f} BNB -> MRS")
                 buy(addr, pk, buy_amount, gwei)
+        # SELL
         else:
             if mrs_bal_wei > 0:
-                sell_amount = int(mrs_bal_wei * SELL_PORTION)                                     # a corriger
-                log(f"↘️​  BNB Down {bnb_change:.2f}%🔻 (${bnb_price:.2f}) -> SELL {SELL_PORTION*100:.1f}% MRS")
+                sell_amount = int(mrs_bal_wei * SELL_PORTION)
+                log(f"↘️  BNB Down {bnb_change:.2f}%🔻 (${bnb_price:.2f}) -> SELL {SELL_PORTION*100:.1f}% MRS")
                 sell(addr, pk, sell_amount, gwei)
 
 if __name__ == "__main__":

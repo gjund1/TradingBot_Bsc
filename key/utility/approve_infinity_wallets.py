@@ -15,7 +15,7 @@ GAS_LIMIT_APPROVE = 100000
 PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E"
 
 # ✅ TON TOKEN
-TOKEN_ADDRESS = "0x14e3598571F4683CEA1Ff2a917F4a3354Cd5842b"        # 🔴 Mets l'adresse ta Crypto ici
+TOKEN_ADDRESS = "0x14e3598571F4683CEA1Ff2a917F4a3354Cd5842b"  # 🔴 Mets l'adresse de votre Token ici
 
 # ✅ ABI minimal pour allowance/approve
 ERC20_ABI = [
