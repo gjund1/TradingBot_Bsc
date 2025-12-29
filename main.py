@@ -16,16 +16,16 @@ from key.email import send_mail
 
 DRY_RUN = True                 # True MODE ESSAI, False pour vrai trading
 DRY_RUN_SLEEP = 10              # 1 min (1 * 60)  /  10s (10)
-WALLETS_RANDOM = True           # Wallets aleatoire
+WALLETS_RANDOM = False           # Wallets aleatoire
 TRADING = True                  # Buy or Sell (On/Off)
 APPROVE = False                 # Approve Wallets Infinity
-H1 = "h1"                       # "h1" ou "m5"
+H1 = "m5"                       # "h1" ou "m5"
 
 BUY_PORTION = Decimal("0.233")                      # ~1/5 BNB wallet
 SELL_PORTION = Decimal("0.733")                     # ~3/4 MRS wallet
 MIN_BNB_USD_THRESHOLD = Decimal("5.0")
 MIN_MRS_USD_THRESHOLD = Decimal("5.0")
-# MAX_MRS_USD_SELL = Decimal("150.0")                 # ~$150
+# MAX_MRS_USD_SELL = Decimal("150.0")                 # ~$150                                                                     # A FAIRE !
 MAX_GAS_USD = Decimal("0.01")
 GWEI = 0.05                                         # Frais de Gas
 GAS_LIMIT = 170000                                  # 170.000 / buy 140.000 / Sell 170.000
@@ -151,7 +151,7 @@ def adjust_gas(current_gwei):
         if new_gwei != current_gwei:
             mail(f"✨ Variation du Gwei {new_gwei:.3f} ({var_gwei * 100:.0f}%)")
         # 🚫 Si variation > +1000% → on ignore
-        if var_gwei > MAX_JUMP:
+        if var_gwei > MAX_JUMP:                                                                                             # Atention A/b, b!=0 
             log(f"⚠️ Variation Gas trop élevée {new_gwei:.3f}, Gwei NON modifié !")
             return current_gwei
         if var_gwei > VARIATION_GAS_THRESHOLD:
@@ -172,14 +172,19 @@ def gas_fee_usd(bnb_price, gwei):
 
 def get_bnb_price():
     url = f"https://api.dexscreener.com/latest/dex/tokens/{WBNB}"
-    try:
-        r = requests.get(url, timeout = 8).json()
-        pair = r["pairs"][0]
-        price = Decimal(str(pair["priceUsd"]))
-        change = float(pair["priceChange"][H1])
-        return price, change
-    except:
-        return None, None
+    for attempt in range(5):
+        try:
+            r = requests.get(url, timeout=8).json()
+            pair = r["pairs"][0]
+            price = Decimal(str(pair["priceUsd"]))
+            change = float(pair["priceChange"][H1])
+            return price, change
+        except Exception as e:
+            log(f"⚠️ get_bnb_price erreur ({attempt+1}/5): {e}")
+            time.sleep(60)
+
+    log("❌ get_bnb_price échec après 5 tentatives")
+    return None, None
     
 def get_mrs_price():
     url = f"https://api.dexscreener.com/latest/dex/tokens/{CONTRACT_MRS}"
@@ -260,6 +265,10 @@ def approve_infinity(wallet, private_key, gwei):
 
 def buy(wallet, private_key, bnb_amount, gwei):
     bnb_price, _ = get_bnb_price()
+    if bnb_price is None:
+        log("❌ Impossible de récupérer le prix BNB → BUY annulé")
+        mail("❌ Impossible de récupérer le prix BNB → BUY annulé")
+        return
     gas_usd = gas_fee_usd(bnb_price, gwei)
     if gas_usd > MAX_GAS_USD:
         log(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — BUY annulé")
@@ -303,6 +312,10 @@ def buy(wallet, private_key, bnb_amount, gwei):
 
 def sell(wallet, private_key, token_wei, gwei):
     bnb_price, _ = get_bnb_price()
+    if bnb_price is None:
+        log("❌ Impossible de récupérer le prix BNB → SELL annulé")
+        mail("❌ Impossible de récupérer le prix BNB → SELL annulé")
+        return
     gas_usd = gas_fee_usd(bnb_price, gwei)
     if gas_usd > MAX_GAS_USD:
         log(f"⛔ Gas trop cher ({gas_usd:.4f}$) > {MAX_GAS_USD}$ — SELL annulé")
